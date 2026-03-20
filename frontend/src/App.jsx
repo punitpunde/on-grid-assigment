@@ -22,36 +22,49 @@ function App() {
   const [chartError, setChartError] = useState(null);
   const [year, setYear] = useState(new Date().getFullYear());
   const [month, setMonth] = useState(new Date().getMonth() + 1);
-  const [form, setForm] = useState({
-    category_id: "",
-    amount: "",
-    description: "",
-    expense_date: "",
-  });
+
+  const [categoryId, setCategoryId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [expenseDate, setExpenseDate] = useState(new Date().toISOString().slice(0, 10));
+
   const [catName, setCatName] = useState("");
-  const [msg, setMsg] = useState("");
+  const [catError, setCatError] = useState("");
+  const [expenseError, setExpenseError] = useState("");
 
   const loadCategories = useCallback(async () => {
-    const r = await fetch(`${API}/categories`);
-    const data = await r.json();
-    setCategories(Array.isArray(data) ? data : []);
+    try {
+      const r = await fetch(`${API}/categories`);
+      const data = await r.json();
+      setCategories(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error(e);
+    }
   }, []);
 
   const loadExpenses = useCallback(async () => {
-    const r = await fetch(
-      `${API}/expenses?page=${page}&per_page=${perPage}`
-    );
-    const data = await r.json();
-    setExpenses(data.items || []);
-    setTotal(data.total || 0);
+    try {
+      const r = await fetch(
+        `${API}/expenses?page=${page-1}&per_page=${perPage}`
+      );
+      const data = await r.json();
+      setExpenses(data.items || []);
+      setTotal(data.total || 0);
+    } catch (e) {
+      console.error(e);
+    }
   }, [page, perPage]);
 
   const loadMonthlyReport = useCallback(async () => {
-    const r = await fetch(
-      `${API}/reports/monthly?year=${year}&month=${month}`
-    );
-    const data = await r.json();
-    setMonthlyByCat(data.category_totals_for_chart || []);
+    try {
+      const r = await fetch(
+        `${API}/reports/monthly?year=${year}&month=${month}`
+      );
+      const data = await r.json();
+      setMonthlyByCat(data.category_totals_for_chart || []);
+    } catch (e) {
+      console.error(e);
+    }
   }, [year, month]);
 
   const loadTrend = useCallback(async () => {
@@ -59,9 +72,9 @@ function App() {
     try {
       const r = await fetch(`${API}/reports/monthly-trend`);
       const data = await r.json();
-      const series = data.monthly_series.map((row) => ({
-        month: row.month,
-        total: row.total,
+      const series = (data.trend_rows || data.monthly_series || []).map((row) => ({
+        month: row.period || row.month,
+        total: row.spend || row.total,
       }));
       setTrendData(series);
     } catch (e) {
@@ -84,57 +97,103 @@ function App() {
 
   const addCategory = async (e) => {
     e.preventDefault();
-    setMsg("");
-    const r = await fetch(`${API}/categories`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: catName }),
-    });
-    if (r.ok) {
-      setCatName("");
-      loadCategories();
-    } else {
-      const j = await r.json().catch(() => ({}));
-      setMsg(j.error || "Failed");
+    setCatError("");
+
+    const trimmedName = catName.trim();
+    if (!trimmedName) {
+      setCatError("Category name is required.");
+      return;
+    }
+
+    try {
+      const r = await fetch(`${API}/categories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmedName }),
+      });
+      
+      if (r.ok) {
+        setCatName("");
+        loadCategories();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        setCatError(j.error || "Failed to create category.");
+      }
+    } catch (err) {
+      setCatError("Network error.");
     }
   };
 
   const addExpense = async (e) => {
     e.preventDefault();
-    setMsg("");
-    const dateStr =
-      form.expense_date ||
-      new Date().toISOString().slice(0, 10);
-    const r = await fetch(`${API}/expenses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        category_id: Number(form.category_id),
-        amount: form.amount,
-        description: form.description,
-        expense_date: dateStr,
-      }),
-    });
-    if (r.ok) {
-      setForm((f) => ({ ...f, amount: "", description: "" }));
-      loadExpenses();
-      loadMonthlyReport();
-      loadTrend();
-    } else {
-      const j = await r.json().catch(() => ({}));
-      setMsg(j.error || "Failed");
+    setExpenseError("");
+    
+    if (!categoryId) {
+      setExpenseError("Please select a category.");
+      return;
+    }
+
+    const numAmount = Number(amount);
+    if (!amount || isNaN(numAmount) || numAmount <= 0) {
+      setExpenseError("Please enter a valid amount greater than 0.");
+      return;
+    }
+
+    if (!expenseDate) {
+      setExpenseError("Expense date is required.");
+      return;
+    }
+
+    try {
+      const r = await fetch(`${API}/expenses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          category_id: Number(categoryId),
+          amount: numAmount,
+          description: description.trim(),
+          expense_date: expenseDate,
+        }),
+      });
+      
+      if (r.ok) {
+        setCategoryId(""); // FIX: Reset category dropdown
+        setAmount("");
+        setDescription("");
+        setExpenseDate(new Date().toISOString().slice(0, 10)); 
+        
+        // Reset to page 1 to see the newest expense
+        setPage(1); 
+        
+        loadExpenses();
+        loadMonthlyReport();
+        loadTrend();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        setExpenseError(j.error || "Failed to add expense.");
+      }
+    } catch (err) {
+      setExpenseError("Network error.");
     }
   };
 
   const removeExpense = async (id) => {
-    await fetch(`${API}/expenses/${id}`, { method: "DELETE" });
-    loadExpenses();
-    loadMonthlyReport();
-    loadTrend();
+    try {
+      const r = await fetch(`${API}/expenses/${id}`, { method: "DELETE" });
+      if (r.ok) {
+        loadExpenses();
+        loadMonthlyReport();
+        loadTrend();
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const pageTotal = expenses.reduce((a, e) => a + e.amount, 0);
-  const totalPages = Math.max(1, Math.floor(total / perPage));
+  const monthlyTotal = monthlyByCat.reduce((a, c) => a + Number(c.amt || 0), 0);
+  
+  // FIX: Use Math.ceil instead of Math.floor so partial pages are counted
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
     <>
@@ -153,6 +212,7 @@ function App() {
           </div>
           <button type="submit">Add category</button>
         </form>
+        {catError && <div className="error">{catError}</div>}
         <p className="muted">
           {categories.map((c) => c.name).join(", ") || "No categories yet."}
         </p>
@@ -165,10 +225,8 @@ function App() {
             <div>
               <label>Category</label>
               <select
-                value={form.category_id}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, category_id: e.target.value }))
-                }
+                value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value)}
               >
                 <option value="">—</option>
                 {categories.map((c) => (
@@ -183,10 +241,13 @@ function App() {
               <input
                 type="text"
                 inputMode="decimal"
-                value={form.amount}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, amount: e.target.value }))
-                }
+                value={amount}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === "" || /^\d*\.?\d*$/.test(val)) {
+                    setAmount(val);
+                  }
+                }}
                 placeholder="12.50"
               />
             </div>
@@ -194,10 +255,8 @@ function App() {
               <label>Date</label>
               <input
                 type="date"
-                value={form.expense_date}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, expense_date: e.target.value }))
-                }
+                value={expenseDate}
+                onChange={(e) => setExpenseDate(e.target.value)}
               />
             </div>
           </div>
@@ -206,17 +265,15 @@ function App() {
               <label>Description</label>
               <input
                 style={{ maxWidth: "100%" }}
-                value={form.description}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, description: e.target.value }))
-                }
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
                 placeholder="Optional"
               />
             </div>
             <button type="submit">Add expense</button>
           </div>
         </form>
-        {msg && <div className="error">{msg}</div>}
+        {expenseError && <div className="error">{expenseError}</div>}
       </div>
 
       <div className="card">
@@ -242,7 +299,7 @@ function App() {
           </div>
         </div>
         <p className="muted">
-          Sum on this page (strings): <strong>{String(pageTotal)}</strong>
+          Total for {year}-{String(month).padStart(2, "0")}: <strong>{monthlyTotal.toFixed(2)}</strong>
         </p>
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height="100%">
@@ -253,7 +310,7 @@ function App() {
               <Tooltip
                 contentStyle={{ background: "#1a1f26", border: "1px solid #38444d" }}
               />
-              <Bar dataKey="value" fill="#1d9bf0" name="Total" />
+              <Bar dataKey="amt" fill="#1d9bf0" name="Total" />
             </BarChart>
           </ResponsiveContainer>
         </div>

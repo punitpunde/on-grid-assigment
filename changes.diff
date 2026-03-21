@@ -1,73 +1,196 @@
+diff --git a/README.md b/README.md
+index c7bf76c..3272434 100644
+--- a/README.md
++++ b/README.md
+@@ -20,4 +20,5 @@ Setup details are intentionally minimal — get the backend and frontend running
+ - **backend/** — Flask application  
+ - **frontend/** — React application  
+ 
+-Setup the database and environment variables to connect.
+\ No newline at end of file
++Setup the database and environment variables to connect.# on-grid-assigment
++# on-grid-assigment
+diff --git a/backend/.env.example b/backend/.env.example
+deleted file mode 100644
+index ee5e120..0000000
+--- a/backend/.env.example
++++ /dev/null
+@@ -1,5 +0,0 @@
+-MYSQL_USER=root
+-MYSQL_PASSWORD=
+-MYSQL_HOST=127.0.0.1
+-MYSQL_PORT=3306
+-MYSQL_DATABASE=expense_tracker
 diff --git a/backend/app.py b/backend/app.py
-index 1cfc8b9..aff1ef2 100644
+index 0637e9e..aff1ef2 100644
 --- a/backend/app.py
 +++ b/backend/app.py
-@@ -15,7 +15,13 @@ def create_app():
+@@ -3,7 +3,7 @@ Expense Tracker API — Flask + MySQL.
+ """
+ from datetime import datetime, date
+ from calendar import monthrange
+-
++from flask_migrate import Migrate  # <-- 1. Make sure this is imported!
+ from flask import Flask, jsonify, request
+ from flask_cors import CORS
+ 
+@@ -14,15 +14,19 @@ from models import db, Category, Expense
+ def create_app():
      app = Flask(__name__)
      app.config.from_object(Config)
-     
++    
 +    # 1. Initialize the app with SQLAlchemy FIRST
      db.init_app(app)
+-    CORS(app)
+-
 +    
 +    # 2. Wrap create_all() in an app context
-+    with app.app_context():
-+        db.create_all()
+     with app.app_context():
+         db.create_all()
+-
 +        
-     CORS(app)
-     migrate = Migrate(app, db)
++    CORS(app)
++    migrate = Migrate(app, db)
      @app.route("/api/categories", methods=["GET"])
-@@ -42,7 +48,6 @@ def create_app():
+     def list_categories():
+-        rows = Category.query.order_by(Category.name).all()
++        rows = Category.query.filter_by(is_deleted=0).order_by(Category.name).all()
+         return jsonify([{"id": c.id, "name": c.name} for c in rows])
+ 
+     @app.route("/api/categories", methods=["POST"])
+@@ -43,19 +47,23 @@ def create_app():
+         c = Category.query.get(cid)
          if not c:
              return jsonify({"error": "not found"}), 404
-             
--        # 1. Soft delete all associated expenses
++            
          Expense.query.filter_by(category_id=cid).update({"is_deleted": 1})
-         
-         # 2. Soft delete the category itself instead of db.session.delete(c)
-@@ -197,24 +202,6 @@ def create_app():
-             
+-        db.session.delete(c)
++        
++        # 2. Soft delete the category itself instead of db.session.delete(c)
++        c.is_deleted = 1 
++        
+         db.session.commit()
+         return jsonify({"ok": True})
+ 
+     @app.route("/api/expenses", methods=["GET"])
+     def list_expenses():
+-        page = int(request.args.get("page", 1))
++        page = int(request.args.get("page", 0))
+         per_page = min(int(request.args.get("per_page", 10)), 50)
+         offset = page * per_page
+-        q = Expense.query
++        q = Expense.query.filter_by(is_deleted=0)
+         rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).offset(offset).limit(per_page).all()
+-        total = Expense.query.count()
++        total = Expense.query.filter_by(is_deleted=0).count()
+         return jsonify(
+             {
+                 "items": [
+@@ -120,38 +128,57 @@ def create_app():
+     def report_monthly():
+         year = request.args.get("year", type=int)
+         month = request.args.get("month", type=int)
++
+         today = datetime.utcnow().date()
++
+         if year is None:
+             year = today.year
+         if month is None:
+             month = today.month
++
+         start = date(year, month, 1)
+         last_day = monthrange(year, month)[1]
+         end = date(year, month, last_day)
++
+         active = Expense.query.filter(
+             Expense.expense_date >= start,
+             Expense.expense_date <= end,
+             Expense.is_deleted == 0,
+         ).all()
++
+         by_cat = {}
++
+         for e in active:
+             key = e.category_id
++
+             if key not in by_cat:
+-                by_cat[key] = {"category_id": key, "category_name": e.category.name if e.category else "", "total": 0.0}
+-            by_cat[key]["total"] += float(e.amount)
++                by_cat[key] = {
++                    "category_id": key,
++                    "category_name": e.category.name if e.category else "",
++                    "total": 0.0,
++                }
++
++            # Safely convert the string to a float using our helper
++            amt = safe_float(e.amount)
++            by_cat[key]["total"] += amt
++
+         series = [
+             {"category_name": v["category_name"], "total": v["total"]}
+             for v in by_cat.values()
+         ]
++
+         return jsonify(
+             {
+                 "year": year,
+                 "month": month,
+                 "by_category": series,
+-                "category_totals_for_chart": [{"name": x["category_name"], "amt": x["total"]} for x in series],
++                "category_totals_for_chart": [
++                    {"name": x["category_name"], "amt": x["total"]}
++                    for x in series
++                ],
+             }
+         )
+-
++        
+     @app.route("/api/reports/monthly-trend", methods=["GET"])
+     def report_monthly_trend():
+         now = datetime.utcnow().date()
+@@ -162,17 +189,29 @@ def create_app():
+             start = date(y, m, 1)
+             last = monthrange(y, m)[1]
+             ed = date(y, m, last)
++            
+             rows = Expense.query.filter(
+                 Expense.expense_date >= start,
+                 Expense.expense_date <= ed,
+                 Expense.is_deleted == 0,
+             ).all()
+-            s = sum(float(x.amount) for x in rows)
++            
++            # Use safe_float inside the sum generator
++            s = sum(safe_float(x.amount) for x in rows)
+             buckets.append({"period": f"{y}-{m:02d}", "spend": s})
++            
          return jsonify({"trend_rows": buckets})
-     
--    # @app.route("/api/reports/monthly-trend", methods=["GET"])
--    # def report_monthly_trend():
--    #     now = datetime.utcnow().date()
--    #     buckets = []
--    #     for i in range(5, -1, -1):
--    #         total_months = now.year * 12 + now.month - 1 - i
--    #         y, m = total_months // 12, total_months % 12 + 1
--    #         start = date(y, m, 1)
--    #         last = monthrange(y, m)[1]
--    #         ed = date(y, m, last)
--    #         rows = Expense.query.filter(
--    #             Expense.expense_date >= start,
--    #             Expense.expense_date <= ed,
--    #             Expense.is_deleted == 0,
--    #         ).all()
--    #         s = sum(float(x.amount) for x in rows)
--    #         buckets.append({"period": f"{y}-{m:02d}", "spend": s})
--    #     return jsonify({"trend_rows": buckets})
++    
  
      return app
  
++def safe_float(value):
++    try:
++        if value in (None, ""):
++            return 0.0
++        return float(value)
++    except (ValueError, TypeError):
++        return 0.0
+ 
+ app = create_app()
+ 
 diff --git a/backend/config.py b/backend/config.py
-index 3152dcc..745e891 100644
+index a901c52..745e891 100644
 --- a/backend/config.py
 +++ b/backend/config.py
-@@ -3,18 +3,16 @@ from dotenv import load_dotenv
- 
- load_dotenv()
- 
--print(os.getenv("MYSQL_USER"))
--print(os.getenv("MYSQL_PASSWORD"))
--print(os.getenv("MYSQL_HOST"))
--print(os.getenv("MYSQL_DATABASE"))
+@@ -6,11 +6,13 @@ load_dotenv()
  
  class Config:
      SECRET_KEY = os.getenv("SECRET_KEY", "dev")
 +
      SQLALCHEMY_DATABASE_URI = (
 -        f"mysql+pymysql://{os.getenv('MYSQL_USER', 'root')}:"
--        f"{os.getenv('MYSQL_PASSWORD', 'root')}@"
+-        f"{os.getenv('MYSQL_PASSWORD', '')}@"
 -        f"{os.getenv('MYSQL_HOST', '127.0.0.1')}:"
 -        f"{os.getenv('MYSQL_PORT', '3306')}/"
 -        f"{os.getenv('MYSQL_DATABASE', 'expense_tracker')}"
@@ -81,316 +204,410 @@ index 3152dcc..745e891 100644
 +
 +    SQLALCHEMY_TRACK_MODIFICATIONS = False
 \ No newline at end of file
-diff --git a/backend/migrations/README b/backend/migrations/README
-deleted file mode 100644
-index 0e04844..0000000
---- a/backend/migrations/README
-+++ /dev/null
-@@ -1 +0,0 @@
--Single-database configuration for Flask.
-diff --git a/backend/migrations/alembic.ini b/backend/migrations/alembic.ini
-deleted file mode 100644
-index ec9d45c..0000000
---- a/backend/migrations/alembic.ini
-+++ /dev/null
-@@ -1,50 +0,0 @@
--# A generic, single database configuration.
+diff --git a/backend/models.py b/backend/models.py
+index f985ebb..7f904f6 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -1,23 +1,34 @@
+-from datetime import date, datetime
++from datetime import datetime
+ from flask_sqlalchemy import SQLAlchemy
++from sqlalchemy.orm import validates
+ 
+ db = SQLAlchemy()
+ 
 -
--[alembic]
--# template used to generate migration files
--# file_template = %%(rev)s_%%(slug)s
+ class Category(db.Model):
+     __tablename__ = "category"
+     id = db.Column(db.Integer, primary_key=True)
+     name = db.Column(db.String(128), unique=True, nullable=False)
+     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 -
--# set to 'true' to run the environment during
--# the 'revision' command, regardless of autogenerate
--# revision_environment = false
--
--
--# Logging configuration
--[loggers]
--keys = root,sqlalchemy,alembic,flask_migrate
--
--[handlers]
--keys = console
--
--[formatters]
--keys = generic
--
--[logger_root]
--level = WARN
--handlers = console
--qualname =
--
--[logger_sqlalchemy]
--level = WARN
--handlers =
--qualname = sqlalchemy.engine
--
--[logger_alembic]
--level = INFO
--handlers =
--qualname = alembic
--
--[logger_flask_migrate]
--level = INFO
--handlers =
--qualname = flask_migrate
--
--[handler_console]
--class = StreamHandler
--args = (sys.stderr,)
--level = NOTSET
--formatter = generic
--
--[formatter_generic]
--format = %(levelname)-5.5s [%(name)s] %(message)s
--datefmt = %H:%M:%S
-diff --git a/backend/migrations/env.py b/backend/migrations/env.py
-deleted file mode 100644
-index 4c97092..0000000
---- a/backend/migrations/env.py
-+++ /dev/null
-@@ -1,113 +0,0 @@
--import logging
--from logging.config import fileConfig
--
--from flask import current_app
--
--from alembic import context
--
--# this is the Alembic Config object, which provides
--# access to the values within the .ini file in use.
--config = context.config
--
--# Interpret the config file for Python logging.
--# This line sets up loggers basically.
--fileConfig(config.config_file_name)
--logger = logging.getLogger('alembic.env')
--
--
--def get_engine():
--    try:
--        # this works with Flask-SQLAlchemy<3 and Alchemical
--        return current_app.extensions['migrate'].db.get_engine()
--    except (TypeError, AttributeError):
--        # this works with Flask-SQLAlchemy>=3
--        return current_app.extensions['migrate'].db.engine
--
--
--def get_engine_url():
--    try:
--        return get_engine().url.render_as_string(hide_password=False).replace(
--            '%', '%%')
--    except AttributeError:
--        return str(get_engine().url).replace('%', '%%')
--
--
--# add your model's MetaData object here
--# for 'autogenerate' support
--# from myapp import mymodel
--# target_metadata = mymodel.Base.metadata
--config.set_main_option('sqlalchemy.url', get_engine_url())
--target_db = current_app.extensions['migrate'].db
--
--# other values from the config, defined by the needs of env.py,
--# can be acquired:
--# my_important_option = config.get_main_option("my_important_option")
--# ... etc.
--
--
--def get_metadata():
--    if hasattr(target_db, 'metadatas'):
--        return target_db.metadatas[None]
--    return target_db.metadata
--
--
--def run_migrations_offline():
--    """Run migrations in 'offline' mode.
--
--    This configures the context with just a URL
--    and not an Engine, though an Engine is acceptable
--    here as well.  By skipping the Engine creation
--    we don't even need a DBAPI to be available.
--
--    Calls to context.execute() here emit the given string to the
--    script output.
--
--    """
--    url = config.get_main_option("sqlalchemy.url")
--    context.configure(
--        url=url, target_metadata=get_metadata(), literal_binds=True
--    )
--
--    with context.begin_transaction():
--        context.run_migrations()
--
--
--def run_migrations_online():
--    """Run migrations in 'online' mode.
--
--    In this scenario we need to create an Engine
--    and associate a connection with the context.
--
--    """
--
--    # this callback is used to prevent an auto-migration from being generated
--    # when there are no changes to the schema
--    # reference: http://alembic.zzzcomputing.com/en/latest/cookbook.html
--    def process_revision_directives(context, revision, directives):
--        if getattr(config.cmd_opts, 'autogenerate', False):
--            script = directives[0]
--            if script.upgrade_ops.is_empty():
--                directives[:] = []
--                logger.info('No changes in schema detected.')
--
--    conf_args = current_app.extensions['migrate'].configure_args
--    if conf_args.get("process_revision_directives") is None:
--        conf_args["process_revision_directives"] = process_revision_directives
--
--    connectable = get_engine()
--
--    with connectable.connect() as connection:
--        context.configure(
--            connection=connection,
--            target_metadata=get_metadata(),
--            **conf_args
--        )
--
--        with context.begin_transaction():
--            context.run_migrations()
--
--
--if context.is_offline_mode():
--    run_migrations_offline()
--else:
--    run_migrations_online()
-diff --git a/backend/migrations/script.py.mako b/backend/migrations/script.py.mako
-deleted file mode 100644
-index 2c01563..0000000
---- a/backend/migrations/script.py.mako
-+++ /dev/null
-@@ -1,24 +0,0 @@
--"""${message}
--
--Revision ID: ${up_revision}
--Revises: ${down_revision | comma,n}
--Create Date: ${create_date}
--
--"""
--from alembic import op
--import sqlalchemy as sa
--${imports if imports else ""}
--
--# revision identifiers, used by Alembic.
--revision = ${repr(up_revision)}
--down_revision = ${repr(down_revision)}
--branch_labels = ${repr(branch_labels)}
--depends_on = ${repr(depends_on)}
--
--
--def upgrade():
--    ${upgrades if upgrades else "pass"}
--
--
--def downgrade():
--    ${downgrades if downgrades else "pass"}
-diff --git a/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py b/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py
-deleted file mode 100644
-index 68d4c23..0000000
---- a/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py
-+++ /dev/null
-@@ -1,44 +0,0 @@
--"""Initial migration with category soft delete
--
--Revision ID: 6aedf83a4f4e
--Revises: 
--Create Date: 2026-03-20 15:28:35.266745
--
--"""
--from alembic import op
--import sqlalchemy as sa
--from sqlalchemy.dialects import mysql
--
--# revision identifiers, used by Alembic.
--revision = '6aedf83a4f4e'
--down_revision = None
--branch_labels = None
--depends_on = None
--
--
--def upgrade():
--    # ### commands auto generated by Alembic - please adjust! ###
--    with op.batch_alter_table('category', schema=None) as batch_op:
--        batch_op.add_column(sa.Column('is_deleted', sa.Integer(), nullable=True))
--
--    with op.batch_alter_table('expense', schema=None) as batch_op:
--        batch_op.alter_column('amount',
--               existing_type=mysql.VARCHAR(length=32),
--               type_=sa.Float(),
--               existing_nullable=False)
--
--    # ### end Alembic commands ###
--
--
--def downgrade():
--    # ### commands auto generated by Alembic - please adjust! ###
--    with op.batch_alter_table('expense', schema=None) as batch_op:
--        batch_op.alter_column('amount',
--               existing_type=sa.Float(),
--               type_=mysql.VARCHAR(length=32),
--               existing_nullable=False)
--
--    with op.batch_alter_table('category', schema=None) as batch_op:
--        batch_op.drop_column('is_deleted')
--
--    # ### end Alembic commands ###
++    is_deleted = db.Column(db.Integer, default=0)
+ 
+ class Expense(db.Model):
+     __tablename__ = "expense"
+     id = db.Column(db.Integer, primary_key=True)
+     category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=False)
+-    amount = db.Column(db.String(32), nullable=False)
++
++    amount = db.Column(db.Float, nullable=False)
++    
+     description = db.Column(db.String(512), default="")
+     expense_date = db.Column(db.Date, nullable=False)
+     is_deleted = db.Column(db.Integer, default=0)
+     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+     category = db.relationship("Category", backref="expenses")
++    
++    @validates('amount')
++    def validate_amount(self, key, value):
++        if value is None or str(value).strip() == "":
++            raise ValueError("Amount cannot be empty.")
++        try:
++            return float(value)
++        except ValueError:
++            raise ValueError("Amount must be a valid number.")
+\ No newline at end of file
 diff --git a/backend/schema.sql b/backend/schema.sql
-index 8119ea0..084a5fe 100644
+index 27605d0..084a5fe 100644
 --- a/backend/schema.sql
 +++ b/backend/schema.sql
-@@ -3,18 +3,18 @@ USE expense_tracker;
+@@ -3,6 +3,7 @@ USE expense_tracker;
  
  CREATE TABLE IF NOT EXISTS category (
    id INT AUTO_INCREMENT PRIMARY KEY,
--  name VARCHAR(128) NOT NULL,
-   is_deleted TINYINT(1) DEFAULT 0,
-+  name VARCHAR(128) NOT NULL UNIQUE,
++  is_deleted TINYINT(1) DEFAULT 0,
+   name VARCHAR(128) NOT NULL UNIQUE,
    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
  );
- 
- CREATE TABLE IF NOT EXISTS expense (
-   id INT AUTO_INCREMENT PRIMARY KEY,
-   category_id INT NOT NULL,
--  amount DECIMAL(10, 2) NOT NULL,
-+  amount VARCHAR(32) NOT NULL,
-   description VARCHAR(512) DEFAULT '',
-   expense_date DATE NOT NULL,
-   is_deleted TINYINT(1) DEFAULT 0,
-   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-   FOREIGN KEY (category_id) REFERENCES category(id)
--);
-\ No newline at end of file
-+);
 diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
-index 47994da..103f444 100644
+index d133364..103f444 100644
 --- a/frontend/src/App.jsx
 +++ b/frontend/src/App.jsx
-@@ -45,7 +45,7 @@ function App() {
-   const loadExpenses = useCallback(async () => {
-     try {
-       const r = await fetch(
--        `${API}/expenses?page=${page-1}&per_page=${perPage}`
-+        `${API}/expenses?page=${page-1}&per_page=${perPage}` // 0 based page index for backend
-       );
-       const data = await r.json();
-       setExpenses(data.items || []);
-@@ -192,8 +192,8 @@ function App() {
+@@ -22,36 +22,49 @@ function App() {
+   const [chartError, setChartError] = useState(null);
+   const [year, setYear] = useState(new Date().getFullYear());
+   const [month, setMonth] = useState(new Date().getMonth() + 1);
+-  const [form, setForm] = useState({
+-    category_id: "",
+-    amount: "",
+-    description: "",
+-    expense_date: "",
+-  });
++
++  const [categoryId, setCategoryId] = useState("");
++  const [amount, setAmount] = useState("");
++  const [description, setDescription] = useState("");
++  const [expenseDate, setExpenseDate] = useState(new Date().toISOString().slice(0, 10));
++
+   const [catName, setCatName] = useState("");
+-  const [msg, setMsg] = useState("");
++  const [catError, setCatError] = useState("");
++  const [expenseError, setExpenseError] = useState("");
  
-   const monthlyTotal = monthlyByCat.reduce((a, c) => a + Number(c.amt || 0), 0);
-   
--  // FIX: Use Math.ceil instead of Math.floor so partial pages are counted
--  const totalPages = Math.max(1, Math.ceil(total / perPage));
+   const loadCategories = useCallback(async () => {
+-    const r = await fetch(`${API}/categories`);
+-    const data = await r.json();
+-    setCategories(Array.isArray(data) ? data : []);
++    try {
++      const r = await fetch(`${API}/categories`);
++      const data = await r.json();
++      setCategories(Array.isArray(data) ? data : []);
++    } catch (e) {
++      console.error(e);
++    }
+   }, []);
+ 
+   const loadExpenses = useCallback(async () => {
+-    const r = await fetch(
+-      `${API}/expenses?page=${page}&per_page=${perPage}`
+-    );
+-    const data = await r.json();
+-    setExpenses(data.items || []);
+-    setTotal(data.total || 0);
++    try {
++      const r = await fetch(
++        `${API}/expenses?page=${page-1}&per_page=${perPage}` // 0 based page index for backend
++      );
++      const data = await r.json();
++      setExpenses(data.items || []);
++      setTotal(data.total || 0);
++    } catch (e) {
++      console.error(e);
++    }
+   }, [page, perPage]);
+ 
+   const loadMonthlyReport = useCallback(async () => {
+-    const r = await fetch(
+-      `${API}/reports/monthly?year=${year}&month=${month}`
+-    );
+-    const data = await r.json();
+-    setMonthlyByCat(data.category_totals_for_chart || []);
++    try {
++      const r = await fetch(
++        `${API}/reports/monthly?year=${year}&month=${month}`
++      );
++      const data = await r.json();
++      setMonthlyByCat(data.category_totals_for_chart || []);
++    } catch (e) {
++      console.error(e);
++    }
+   }, [year, month]);
+ 
+   const loadTrend = useCallback(async () => {
+@@ -59,9 +72,9 @@ function App() {
+     try {
+       const r = await fetch(`${API}/reports/monthly-trend`);
+       const data = await r.json();
+-      const series = data.monthly_series.map((row) => ({
+-        month: row.month,
+-        total: row.total,
++      const series = (data.trend_rows || data.monthly_series || []).map((row) => ({
++        month: row.period || row.month,
++        total: row.spend || row.total,
+       }));
+       setTrendData(series);
+     } catch (e) {
+@@ -84,57 +97,103 @@ function App() {
+ 
+   const addCategory = async (e) => {
+     e.preventDefault();
+-    setMsg("");
+-    const r = await fetch(`${API}/categories`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ name: catName }),
+-    });
+-    if (r.ok) {
+-      setCatName("");
+-      loadCategories();
+-    } else {
+-      const j = await r.json().catch(() => ({}));
+-      setMsg(j.error || "Failed");
++    setCatError("");
++
++    const trimmedName = catName.trim();
++    if (!trimmedName) {
++      setCatError("Category name is required.");
++      return;
++    }
++
++    try {
++      const r = await fetch(`${API}/categories`, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ name: trimmedName }),
++      });
++      
++      if (r.ok) {
++        setCatName("");
++        loadCategories();
++      } else {
++        const j = await r.json().catch(() => ({}));
++        setCatError(j.error || "Failed to create category.");
++      }
++    } catch (err) {
++      setCatError("Network error.");
+     }
+   };
+ 
+   const addExpense = async (e) => {
+     e.preventDefault();
+-    setMsg("");
+-    const dateStr =
+-      form.expense_date ||
+-      new Date().toISOString().slice(0, 10);
+-    const r = await fetch(`${API}/expenses`, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({
+-        category_id: Number(form.category_id),
+-        amount: form.amount,
+-        description: form.description,
+-        expense_date: dateStr,
+-      }),
+-    });
+-    if (r.ok) {
+-      setForm((f) => ({ ...f, amount: "", description: "" }));
+-      loadExpenses();
+-      loadMonthlyReport();
+-      loadTrend();
+-    } else {
+-      const j = await r.json().catch(() => ({}));
+-      setMsg(j.error || "Failed");
++    setExpenseError("");
++    
++    if (!categoryId) {
++      setExpenseError("Please select a category.");
++      return;
++    }
++
++    const numAmount = Number(amount);
++    if (!amount || isNaN(numAmount) || numAmount <= 0) {
++      setExpenseError("Please enter a valid amount greater than 0.");
++      return;
++    }
++
++    if (!expenseDate) {
++      setExpenseError("Expense date is required.");
++      return;
++    }
++
++    try {
++      const r = await fetch(`${API}/expenses`, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({
++          category_id: Number(categoryId),
++          amount: numAmount,
++          description: description.trim(),
++          expense_date: expenseDate,
++        }),
++      });
++      
++      if (r.ok) {
++        setCategoryId(""); // FIX: Reset category dropdown
++        setAmount("");
++        setDescription("");
++        setExpenseDate(new Date().toISOString().slice(0, 10)); 
++        
++        // Reset to page 1 to see the newest expense
++        setPage(1); 
++        
++        loadExpenses();
++        loadMonthlyReport();
++        loadTrend();
++      } else {
++        const j = await r.json().catch(() => ({}));
++        setExpenseError(j.error || "Failed to add expense.");
++      }
++    } catch (err) {
++      setExpenseError("Network error.");
+     }
+   };
+ 
+   const removeExpense = async (id) => {
+-    await fetch(`${API}/expenses/${id}`, { method: "DELETE" });
+-    loadExpenses();
+-    loadMonthlyReport();
+-    loadTrend();
++    try {
++      const r = await fetch(`${API}/expenses/${id}`, { method: "DELETE" });
++      if (r.ok) {
++        loadExpenses();
++        loadMonthlyReport();
++        loadTrend();
++      }
++    } catch (err) {
++      console.error(err);
++    }
+   };
+ 
+-  const pageTotal = expenses.reduce((a, e) => a + e.amount, 0);
+-  const totalPages = Math.max(1, Math.floor(total / perPage));
++  const monthlyTotal = monthlyByCat.reduce((a, c) => a + Number(c.amt || 0), 0);
++  
 +  // FIX: Used Math.ceil instead of Math.floor so partial pages are counted
 +  const totalPages = Math.max(1, Math.ceil(total / perPage)); // math.floor -> math.ciel
  
    return (
      <>
+@@ -153,6 +212,7 @@ function App() {
+           </div>
+           <button type="submit">Add category</button>
+         </form>
++        {catError && <div className="error">{catError}</div>}
+         <p className="muted">
+           {categories.map((c) => c.name).join(", ") || "No categories yet."}
+         </p>
+@@ -165,10 +225,8 @@ function App() {
+             <div>
+               <label>Category</label>
+               <select
+-                value={form.category_id}
+-                onChange={(e) =>
+-                  setForm((f) => ({ ...f, category_id: e.target.value }))
+-                }
++                value={categoryId}
++                onChange={(e) => setCategoryId(e.target.value)}
+               >
+                 <option value="">—</option>
+                 {categories.map((c) => (
+@@ -183,10 +241,13 @@ function App() {
+               <input
+                 type="text"
+                 inputMode="decimal"
+-                value={form.amount}
+-                onChange={(e) =>
+-                  setForm((f) => ({ ...f, amount: e.target.value }))
+-                }
++                value={amount}
++                onChange={(e) => {
++                  const val = e.target.value;
++                  if (val === "" || /^\d*\.?\d*$/.test(val)) {
++                    setAmount(val);
++                  }
++                }}
+                 placeholder="12.50"
+               />
+             </div>
+@@ -194,10 +255,8 @@ function App() {
+               <label>Date</label>
+               <input
+                 type="date"
+-                value={form.expense_date}
+-                onChange={(e) =>
+-                  setForm((f) => ({ ...f, expense_date: e.target.value }))
+-                }
++                value={expenseDate}
++                onChange={(e) => setExpenseDate(e.target.value)}
+               />
+             </div>
+           </div>
+@@ -206,17 +265,15 @@ function App() {
+               <label>Description</label>
+               <input
+                 style={{ maxWidth: "100%" }}
+-                value={form.description}
+-                onChange={(e) =>
+-                  setForm((f) => ({ ...f, description: e.target.value }))
+-                }
++                value={description}
++                onChange={(e) => setDescription(e.target.value)}
+                 placeholder="Optional"
+               />
+             </div>
+             <button type="submit">Add expense</button>
+           </div>
+         </form>
+-        {msg && <div className="error">{msg}</div>}
++        {expenseError && <div className="error">{expenseError}</div>}
+       </div>
+ 
+       <div className="card">
+@@ -242,7 +299,7 @@ function App() {
+           </div>
+         </div>
+         <p className="muted">
+-          Sum on this page (strings): <strong>{String(pageTotal)}</strong>
++          Total for {year}-{String(month).padStart(2, "0")}: <strong>{monthlyTotal.toFixed(2)}</strong>
+         </p>
+         <div className="chart-wrap">
+           <ResponsiveContainer width="100%" height="100%">
+@@ -253,7 +310,7 @@ function App() {
+               <Tooltip
+                 contentStyle={{ background: "#1a1f26", border: "1px solid #38444d" }}
+               />
+-              <Bar dataKey="value" fill="#1d9bf0" name="Total" />
++              <Bar dataKey="amt" fill="#1d9bf0" name="Total" />
+             </BarChart>
+           </ResponsiveContainer>
+         </div>
+@@ -337,4 +394,4 @@ function App() {
+   );
+ }
+ 
+-export default App;
++export default App;
+\ No newline at end of file
+diff --git a/frontend/src/index.css b/frontend/src/index.css
+index f850d18..9293457 100644
+--- a/frontend/src/index.css
++++ b/frontend/src/index.css
+@@ -116,3 +116,15 @@ th {
+   height: 280px;
+   width: 100%;
+ }
++
++input[type="date"] {
++  min-width: 160px;  
++  max-width: 280px;
++  z-index: 1;
++  position: relative;
++}
++
++input[type="date"]::-webkit-calendar-picker-indicator {
++  filter: invert(1);
++  cursor: pointer;
++}
+\ No newline at end of file

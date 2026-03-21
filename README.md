@@ -21,3 +21,4 @@ Setup details are intentionally minimal — get the backend and frontend running
 - **frontend/** — React application  
 
 Setup the database and environment variables to connect.# on-grid-assigment
+# on-grid-assigment

@@ -3,7 +3,7 @@ Expense Tracker API — Flask + MySQL.
 """
 from datetime import datetime, date
 from calendar import monthrange
-
+from flask_migrate import Migrate  # <-- 1. Make sure this is imported!
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
@@ -14,15 +14,13 @@ from models import db, Category, Expense
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    
     db.init_app(app)
     CORS(app)
-
-    with app.app_context():
-        db.create_all()
-
+    migrate = Migrate(app, db)
     @app.route("/api/categories", methods=["GET"])
     def list_categories():
-        rows = Category.query.order_by(Category.name).all()
+        rows = Category.query.filter_by(is_deleted=0).order_by(Category.name).all()
         return jsonify([{"id": c.id, "name": c.name} for c in rows])
 
     @app.route("/api/categories", methods=["POST"])
@@ -43,19 +41,24 @@ def create_app():
         c = Category.query.get(cid)
         if not c:
             return jsonify({"error": "not found"}), 404
+            
+        # 1. Soft delete all associated expenses
         Expense.query.filter_by(category_id=cid).update({"is_deleted": 1})
-        db.session.delete(c)
+        
+        # 2. Soft delete the category itself instead of db.session.delete(c)
+        c.is_deleted = 1 
+        
         db.session.commit()
         return jsonify({"ok": True})
 
     @app.route("/api/expenses", methods=["GET"])
     def list_expenses():
-        page = int(request.args.get("page", 1))
+        page = int(request.args.get("page", 0))
         per_page = min(int(request.args.get("per_page", 10)), 50)
         offset = page * per_page
-        q = Expense.query
+        q = Expense.query.filter_by(is_deleted=0)
         rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).offset(offset).limit(per_page).all()
-        total = Expense.query.count()
+        total = Expense.query.filter_by(is_deleted=0).count()
         return jsonify(
             {
                 "items": [
@@ -120,38 +123,57 @@ def create_app():
     def report_monthly():
         year = request.args.get("year", type=int)
         month = request.args.get("month", type=int)
+
         today = datetime.utcnow().date()
+
         if year is None:
             year = today.year
         if month is None:
             month = today.month
+
         start = date(year, month, 1)
         last_day = monthrange(year, month)[1]
         end = date(year, month, last_day)
+
         active = Expense.query.filter(
             Expense.expense_date >= start,
             Expense.expense_date <= end,
             Expense.is_deleted == 0,
         ).all()
+
         by_cat = {}
+
         for e in active:
             key = e.category_id
+
             if key not in by_cat:
-                by_cat[key] = {"category_id": key, "category_name": e.category.name if e.category else "", "total": 0.0}
-            by_cat[key]["total"] += float(e.amount)
+                by_cat[key] = {
+                    "category_id": key,
+                    "category_name": e.category.name if e.category else "",
+                    "total": 0.0,
+                }
+
+            # Safely convert the string to a float using our helper
+            amt = safe_float(e.amount)
+            by_cat[key]["total"] += amt
+
         series = [
             {"category_name": v["category_name"], "total": v["total"]}
             for v in by_cat.values()
         ]
+
         return jsonify(
             {
                 "year": year,
                 "month": month,
                 "by_category": series,
-                "category_totals_for_chart": [{"name": x["category_name"], "amt": x["total"]} for x in series],
+                "category_totals_for_chart": [
+                    {"name": x["category_name"], "amt": x["total"]}
+                    for x in series
+                ],
             }
         )
-
+        
     @app.route("/api/reports/monthly-trend", methods=["GET"])
     def report_monthly_trend():
         now = datetime.utcnow().date()
@@ -162,17 +184,47 @@ def create_app():
             start = date(y, m, 1)
             last = monthrange(y, m)[1]
             ed = date(y, m, last)
+            
             rows = Expense.query.filter(
                 Expense.expense_date >= start,
                 Expense.expense_date <= ed,
                 Expense.is_deleted == 0,
             ).all()
-            s = sum(float(x.amount) for x in rows)
+            
+            # Use safe_float inside the sum generator
+            s = sum(safe_float(x.amount) for x in rows)
             buckets.append({"period": f"{y}-{m:02d}", "spend": s})
+            
         return jsonify({"trend_rows": buckets})
+    
+    # @app.route("/api/reports/monthly-trend", methods=["GET"])
+    # def report_monthly_trend():
+    #     now = datetime.utcnow().date()
+    #     buckets = []
+    #     for i in range(5, -1, -1):
+    #         total_months = now.year * 12 + now.month - 1 - i
+    #         y, m = total_months // 12, total_months % 12 + 1
+    #         start = date(y, m, 1)
+    #         last = monthrange(y, m)[1]
+    #         ed = date(y, m, last)
+    #         rows = Expense.query.filter(
+    #             Expense.expense_date >= start,
+    #             Expense.expense_date <= ed,
+    #             Expense.is_deleted == 0,
+    #         ).all()
+    #         s = sum(float(x.amount) for x in rows)
+    #         buckets.append({"period": f"{y}-{m:02d}", "spend": s})
+    #     return jsonify({"trend_rows": buckets})
 
     return app
 
+def safe_float(value):
+    try:
+        if value in (None, ""):
+            return 0.0
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 app = create_app()
 

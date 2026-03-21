@@ -1,0 +1,396 @@
+diff --git a/backend/app.py b/backend/app.py
+index 1cfc8b9..aff1ef2 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -15,7 +15,13 @@ def create_app():
+     app = Flask(__name__)
+     app.config.from_object(Config)
+     
++    # 1. Initialize the app with SQLAlchemy FIRST
+     db.init_app(app)
++    
++    # 2. Wrap create_all() in an app context
++    with app.app_context():
++        db.create_all()
++        
+     CORS(app)
+     migrate = Migrate(app, db)
+     @app.route("/api/categories", methods=["GET"])
+@@ -42,7 +48,6 @@ def create_app():
+         if not c:
+             return jsonify({"error": "not found"}), 404
+             
+-        # 1. Soft delete all associated expenses
+         Expense.query.filter_by(category_id=cid).update({"is_deleted": 1})
+         
+         # 2. Soft delete the category itself instead of db.session.delete(c)
+@@ -197,24 +202,6 @@ def create_app():
+             
+         return jsonify({"trend_rows": buckets})
+     
+-    # @app.route("/api/reports/monthly-trend", methods=["GET"])
+-    # def report_monthly_trend():
+-    #     now = datetime.utcnow().date()
+-    #     buckets = []
+-    #     for i in range(5, -1, -1):
+-    #         total_months = now.year * 12 + now.month - 1 - i
+-    #         y, m = total_months // 12, total_months % 12 + 1
+-    #         start = date(y, m, 1)
+-    #         last = monthrange(y, m)[1]
+-    #         ed = date(y, m, last)
+-    #         rows = Expense.query.filter(
+-    #             Expense.expense_date >= start,
+-    #             Expense.expense_date <= ed,
+-    #             Expense.is_deleted == 0,
+-    #         ).all()
+-    #         s = sum(float(x.amount) for x in rows)
+-    #         buckets.append({"period": f"{y}-{m:02d}", "spend": s})
+-    #     return jsonify({"trend_rows": buckets})
+ 
+     return app
+ 
+diff --git a/backend/config.py b/backend/config.py
+index 3152dcc..745e891 100644
+--- a/backend/config.py
++++ b/backend/config.py
+@@ -3,18 +3,16 @@ from dotenv import load_dotenv
+ 
+ load_dotenv()
+ 
+-print(os.getenv("MYSQL_USER"))
+-print(os.getenv("MYSQL_PASSWORD"))
+-print(os.getenv("MYSQL_HOST"))
+-print(os.getenv("MYSQL_DATABASE"))
+ 
+ class Config:
+     SECRET_KEY = os.getenv("SECRET_KEY", "dev")
++
+     SQLALCHEMY_DATABASE_URI = (
+-        f"mysql+pymysql://{os.getenv('MYSQL_USER', 'root')}:"
+-        f"{os.getenv('MYSQL_PASSWORD', 'root')}@"
+-        f"{os.getenv('MYSQL_HOST', '127.0.0.1')}:"
+-        f"{os.getenv('MYSQL_PORT', '3306')}/"
+-        f"{os.getenv('MYSQL_DATABASE', 'expense_tracker')}"
++        f"postgresql+psycopg2://{os.getenv('DB_USER', 'postgres')}:"
++        f"{os.getenv('DB_PASSWORD', 'postgres')}@"
++        f"{os.getenv('DB_HOST', '127.0.0.1')}:"
++        f"{os.getenv('DB_PORT', '5432')}/"
++        f"{os.getenv('DB_NAME', 'expense_tracker')}"
+     )
+-    SQLALCHEMY_TRACK_MODIFICATIONS = False
++
++    SQLALCHEMY_TRACK_MODIFICATIONS = False
+\ No newline at end of file
+diff --git a/backend/migrations/README b/backend/migrations/README
+deleted file mode 100644
+index 0e04844..0000000
+--- a/backend/migrations/README
++++ /dev/null
+@@ -1 +0,0 @@
+-Single-database configuration for Flask.
+diff --git a/backend/migrations/alembic.ini b/backend/migrations/alembic.ini
+deleted file mode 100644
+index ec9d45c..0000000
+--- a/backend/migrations/alembic.ini
++++ /dev/null
+@@ -1,50 +0,0 @@
+-# A generic, single database configuration.
+-
+-[alembic]
+-# template used to generate migration files
+-# file_template = %%(rev)s_%%(slug)s
+-
+-# set to 'true' to run the environment during
+-# the 'revision' command, regardless of autogenerate
+-# revision_environment = false
+-
+-
+-# Logging configuration
+-[loggers]
+-keys = root,sqlalchemy,alembic,flask_migrate
+-
+-[handlers]
+-keys = console
+-
+-[formatters]
+-keys = generic
+-
+-[logger_root]
+-level = WARN
+-handlers = console
+-qualname =
+-
+-[logger_sqlalchemy]
+-level = WARN
+-handlers =
+-qualname = sqlalchemy.engine
+-
+-[logger_alembic]
+-level = INFO
+-handlers =
+-qualname = alembic
+-
+-[logger_flask_migrate]
+-level = INFO
+-handlers =
+-qualname = flask_migrate
+-
+-[handler_console]
+-class = StreamHandler
+-args = (sys.stderr,)
+-level = NOTSET
+-formatter = generic
+-
+-[formatter_generic]
+-format = %(levelname)-5.5s [%(name)s] %(message)s
+-datefmt = %H:%M:%S
+diff --git a/backend/migrations/env.py b/backend/migrations/env.py
+deleted file mode 100644
+index 4c97092..0000000
+--- a/backend/migrations/env.py
++++ /dev/null
+@@ -1,113 +0,0 @@
+-import logging
+-from logging.config import fileConfig
+-
+-from flask import current_app
+-
+-from alembic import context
+-
+-# this is the Alembic Config object, which provides
+-# access to the values within the .ini file in use.
+-config = context.config
+-
+-# Interpret the config file for Python logging.
+-# This line sets up loggers basically.
+-fileConfig(config.config_file_name)
+-logger = logging.getLogger('alembic.env')
+-
+-
+-def get_engine():
+-    try:
+-        # this works with Flask-SQLAlchemy<3 and Alchemical
+-        return current_app.extensions['migrate'].db.get_engine()
+-    except (TypeError, AttributeError):
+-        # this works with Flask-SQLAlchemy>=3
+-        return current_app.extensions['migrate'].db.engine
+-
+-
+-def get_engine_url():
+-    try:
+-        return get_engine().url.render_as_string(hide_password=False).replace(
+-            '%', '%%')
+-    except AttributeError:
+-        return str(get_engine().url).replace('%', '%%')
+-
+-
+-# add your model's MetaData object here
+-# for 'autogenerate' support
+-# from myapp import mymodel
+-# target_metadata = mymodel.Base.metadata
+-config.set_main_option('sqlalchemy.url', get_engine_url())
+-target_db = current_app.extensions['migrate'].db
+-
+-# other values from the config, defined by the needs of env.py,
+-# can be acquired:
+-# my_important_option = config.get_main_option("my_important_option")
+-# ... etc.
+-
+-
+-def get_metadata():
+-    if hasattr(target_db, 'metadatas'):
+-        return target_db.metadatas[None]
+-    return target_db.metadata
+-
+-
+-def run_migrations_offline():
+-    """Run migrations in 'offline' mode.
+-
+-    This configures the context with just a URL
+-    and not an Engine, though an Engine is acceptable
+-    here as well.  By skipping the Engine creation
+-    we don't even need a DBAPI to be available.
+-
+-    Calls to context.execute() here emit the given string to the
+-    script output.
+-
+-    """
+-    url = config.get_main_option("sqlalchemy.url")
+-    context.configure(
+-        url=url, target_metadata=get_metadata(), literal_binds=True
+-    )
+-
+-    with context.begin_transaction():
+-        context.run_migrations()
+-
+-
+-def run_migrations_online():
+-    """Run migrations in 'online' mode.
+-
+-    In this scenario we need to create an Engine
+-    and associate a connection with the context.
+-
+-    """
+-
+-    # this callback is used to prevent an auto-migration from being generated
+-    # when there are no changes to the schema
+-    # reference: http://alembic.zzzcomputing.com/en/latest/cookbook.html
+-    def process_revision_directives(context, revision, directives):
+-        if getattr(config.cmd_opts, 'autogenerate', False):
+-            script = directives[0]
+-            if script.upgrade_ops.is_empty():
+-                directives[:] = []
+-                logger.info('No changes in schema detected.')
+-
+-    conf_args = current_app.extensions['migrate'].configure_args
+-    if conf_args.get("process_revision_directives") is None:
+-        conf_args["process_revision_directives"] = process_revision_directives
+-
+-    connectable = get_engine()
+-
+-    with connectable.connect() as connection:
+-        context.configure(
+-            connection=connection,
+-            target_metadata=get_metadata(),
+-            **conf_args
+-        )
+-
+-        with context.begin_transaction():
+-            context.run_migrations()
+-
+-
+-if context.is_offline_mode():
+-    run_migrations_offline()
+-else:
+-    run_migrations_online()
+diff --git a/backend/migrations/script.py.mako b/backend/migrations/script.py.mako
+deleted file mode 100644
+index 2c01563..0000000
+--- a/backend/migrations/script.py.mako
++++ /dev/null
+@@ -1,24 +0,0 @@
+-"""${message}
+-
+-Revision ID: ${up_revision}
+-Revises: ${down_revision | comma,n}
+-Create Date: ${create_date}
+-
+-"""
+-from alembic import op
+-import sqlalchemy as sa
+-${imports if imports else ""}
+-
+-# revision identifiers, used by Alembic.
+-revision = ${repr(up_revision)}
+-down_revision = ${repr(down_revision)}
+-branch_labels = ${repr(branch_labels)}
+-depends_on = ${repr(depends_on)}
+-
+-
+-def upgrade():
+-    ${upgrades if upgrades else "pass"}
+-
+-
+-def downgrade():
+-    ${downgrades if downgrades else "pass"}
+diff --git a/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py b/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py
+deleted file mode 100644
+index 68d4c23..0000000
+--- a/backend/migrations/versions/6aedf83a4f4e_initial_migration_with_category_soft_.py
++++ /dev/null
+@@ -1,44 +0,0 @@
+-"""Initial migration with category soft delete
+-
+-Revision ID: 6aedf83a4f4e
+-Revises: 
+-Create Date: 2026-03-20 15:28:35.266745
+-
+-"""
+-from alembic import op
+-import sqlalchemy as sa
+-from sqlalchemy.dialects import mysql
+-
+-# revision identifiers, used by Alembic.
+-revision = '6aedf83a4f4e'
+-down_revision = None
+-branch_labels = None
+-depends_on = None
+-
+-
+-def upgrade():
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    with op.batch_alter_table('category', schema=None) as batch_op:
+-        batch_op.add_column(sa.Column('is_deleted', sa.Integer(), nullable=True))
+-
+-    with op.batch_alter_table('expense', schema=None) as batch_op:
+-        batch_op.alter_column('amount',
+-               existing_type=mysql.VARCHAR(length=32),
+-               type_=sa.Float(),
+-               existing_nullable=False)
+-
+-    # ### end Alembic commands ###
+-
+-
+-def downgrade():
+-    # ### commands auto generated by Alembic - please adjust! ###
+-    with op.batch_alter_table('expense', schema=None) as batch_op:
+-        batch_op.alter_column('amount',
+-               existing_type=sa.Float(),
+-               type_=mysql.VARCHAR(length=32),
+-               existing_nullable=False)
+-
+-    with op.batch_alter_table('category', schema=None) as batch_op:
+-        batch_op.drop_column('is_deleted')
+-
+-    # ### end Alembic commands ###
+diff --git a/backend/schema.sql b/backend/schema.sql
+index 8119ea0..084a5fe 100644
+--- a/backend/schema.sql
++++ b/backend/schema.sql
+@@ -3,18 +3,18 @@ USE expense_tracker;
+ 
+ CREATE TABLE IF NOT EXISTS category (
+   id INT AUTO_INCREMENT PRIMARY KEY,
+-  name VARCHAR(128) NOT NULL,
+   is_deleted TINYINT(1) DEFAULT 0,
++  name VARCHAR(128) NOT NULL UNIQUE,
+   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+ );
+ 
+ CREATE TABLE IF NOT EXISTS expense (
+   id INT AUTO_INCREMENT PRIMARY KEY,
+   category_id INT NOT NULL,
+-  amount DECIMAL(10, 2) NOT NULL,
++  amount VARCHAR(32) NOT NULL,
+   description VARCHAR(512) DEFAULT '',
+   expense_date DATE NOT NULL,
+   is_deleted TINYINT(1) DEFAULT 0,
+   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+   FOREIGN KEY (category_id) REFERENCES category(id)
+-);
+\ No newline at end of file
++);
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 47994da..103f444 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -45,7 +45,7 @@ function App() {
+   const loadExpenses = useCallback(async () => {
+     try {
+       const r = await fetch(
+-        `${API}/expenses?page=${page-1}&per_page=${perPage}`
++        `${API}/expenses?page=${page-1}&per_page=${perPage}` // 0 based page index for backend
+       );
+       const data = await r.json();
+       setExpenses(data.items || []);
+@@ -192,8 +192,8 @@ function App() {
+ 
+   const monthlyTotal = monthlyByCat.reduce((a, c) => a + Number(c.amt || 0), 0);
+   
+-  // FIX: Use Math.ceil instead of Math.floor so partial pages are counted
+-  const totalPages = Math.max(1, Math.ceil(total / perPage));
++  // FIX: Used Math.ceil instead of Math.floor so partial pages are counted
++  const totalPages = Math.max(1, Math.ceil(total / perPage)); // math.floor -> math.ciel
+ 
+   return (
+     <>
